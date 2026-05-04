@@ -1,0 +1,300 @@
+---
+title: "XAI - Exercise 5: Partial Dependence Plots (PDP)"
+author: "Data Science - Model-Agnostic Methods"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: '2'
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 2
+  word_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+# Introduction
+
+This report applies **Partial Dependence Plots (PDP)** to two real-world prediction tasks. PDP is a global model-agnostic interpretability method that visualises the marginal effect of one or two features on the predicted outcome of a previously fitted model. All models used are **Random Forests** fitted using the `randomForest` package.
+
+The partial dependence function is estimated as:
+
+$$\hat{f}_{x_S}(x_S) \approx \frac{1}{n}\sum_{i=1}^{n}\hat{f}(x_S,\, x_C^{(i)})$$
+
+where $x_S$ is the feature of interest and $x_C$ are the remaining features marginalised over the data. For every plot, a grid of **at least 50 evenly spaced values** is evaluated. Rug marks along the axes represent the empirical distribution of training observations, helping distinguish well-supported regions from potential extrapolations.
+
+---
+
+# Exercise 1 - 1D PDP: Bike Rental Prediction
+
+## Data Preparation and Model Training
+
+```{r ex1-setup}
+# Libraries
+library(randomForest)
+library(ggplot2)
+library(gridExtra)
+library(scales)
+
+# Load data
+day <- read.csv("day.csv")
+
+# Days elapsed since 01/01/2011
+day$days_since_2011 <- as.numeric(
+  as.Date(day$dteday) - as.Date("2011-01-01")
+)
+
+# Feature set (exclude raw date, id, casual, registered)
+features_bike <- c("days_since_2011", "season", "yr", "mnth", "holiday",
+                   "weekday", "workingday", "weathersit",
+                   "temp", "atemp", "hum", "windspeed")
+
+train_bike <- day[, c(features_bike, "cnt")]
+
+# Train Random Forest on the full dataset (731 rows)
+# A seed is set to ensure model reproducibility:
+# Random Forests have internal randomness (bootstrap and variable selection)
+# and we want identical results every time the code is executed.
+set.seed(42)
+rf_bike <- randomForest(cnt ~ ., data = train_bike, ntree = 500)
+
+cat("Random Forest - Bike Rentals\n")
+cat("OOB R2:", round(1 - rf_bike$mse[500] / var(day$cnt), 3), "\n")
+```
+
+## PDP Helper Functions
+
+```{r ex1-helpers}
+# Generic 1D PDP function: evaluates the model over a grid of >= 50 values
+compute_pdp_1d <- function(model, feature, train_df, n_grid = 50) {
+  grid_vals <- seq(min(train_df[[feature]]),
+                   max(train_df[[feature]]),
+                   length.out = n_grid)
+  pdp_vals <- sapply(grid_vals, function(v) {
+    tmp            <- train_df
+    tmp[[feature]] <- v
+    mean(predict(model, newdata = tmp))
+  })
+  data.frame(x = grid_vals, yhat = pdp_vals)
+}
+
+# Plot function (line + rug, matching class slide style)
+plot_pdp_bike <- function(pdp_df, x_label, train_df, feature,
+                          y_limits = c(0, 5500)) {
+  ggplot(pdp_df, aes(x = x, y = yhat)) +
+    geom_line(colour = "black", linewidth = 0.9) +
+    geom_rug(
+      data        = train_df,
+      aes_string(x = feature),
+      sides       = "b",
+      alpha       = 0.4,
+      colour      = "black",
+      inherit.aes = FALSE
+    ) +
+    scale_y_continuous(limits = y_limits,
+                       breaks = seq(0, 5000, by = 1000)) +
+    labs(x = x_label, y = "Predicted number of bike rentals") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+}
+```
+
+## Results
+
+```{r ex1-plots, fig.height=8, fig.width=10}
+# Compute the four 1D PDPs (50 grid points each)
+pdp_days <- compute_pdp_1d(rf_bike, "days_since_2011", train_bike)
+pdp_temp <- compute_pdp_1d(rf_bike, "temp",            train_bike)
+pdp_hum  <- compute_pdp_1d(rf_bike, "hum",             train_bike)
+pdp_wind <- compute_pdp_1d(rf_bike, "windspeed",       train_bike)
+
+# Build plots
+p1 <- plot_pdp_bike(pdp_days, "Days since 2011", day, "days_since_2011")
+p2 <- plot_pdp_bike(pdp_temp, "Temperature",     day, "temp")
+p3 <- plot_pdp_bike(pdp_hum,  "Humidity",        day, "hum")
+p4 <- plot_pdp_bike(pdp_wind, "Windspeed",       day, "windspeed")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+## Analysis
+
+**Days since 2011** shows a stepped pattern: rentals start at ~3,200, stabilise around 4,000 until day 350, then jump sharply to ~5,000-5,300 in the second year. The model clearly captures the year-on-year growth of the service between 2011 and 2012.
+
+**Temperature** presents a saturating curve: rentals grow from ~3,600 at low temperatures up to a plateau of ~4,800-5,000 at moderate-to-high temperatures (0.50-0.75), levelling off beyond that point. Mild temperatures encourage use, but the additional benefit fades beyond a certain level.
+
+**Humidity** has a threshold-based negative effect: the curve remains flat at around ~4,700 rentals up to 50% humidity, after which it falls progressively to ~3,700. Humidity only penalises demand significantly once it exceeds that midpoint.
+
+**Windspeed** shows a smooth and uniform negative relationship: rentals drop from ~4,650 to ~4,100 between the minimum and maximum observed wind values. The impact is moderate with no clear thresholds, making it the least influential of the four variables.
+
+---
+
+# Exercise 2 - 2D PDP: Humidity x Temperature
+
+## Approach
+
+The Random Forest is trained on the **full dataset (731 rows)**. For the PDP computation, a random sample of **50 observations** is used to approximate the marginal expectation: the two features of interest are substituted across the grid and predictions are averaged over the sampled rows. `geom_tile()` renders the heatmap with tile dimensions slightly expanded (`x 1.05`) to avoid visual gaps. Rug marks on both axes show where the data actually concentrates.
+
+```{r ex2-pdp, fig.height=6, fig.width=8}
+# The Random Forest was trained on all 731 rows (Exercise 1)
+# 50 random rows are sampled here to approximate the PDP marginalisation.
+# No seed is set: we want the sample to be truly random,
+# as the goal is to approximate the marginal expectation over the dataset
+# without biasing the selection towards a fixed specific sample.
+sample_idx_2d <- sample(nrow(train_bike), 50)
+train_2d      <- train_bike[sample_idx_2d, ]
+
+# 50 x 50 grid
+hum_grid  <- seq(min(train_bike$hum),  max(train_bike$hum),  length.out = 50)
+temp_grid <- seq(min(train_bike$temp), max(train_bike$temp), length.out = 50)
+grid_2d   <- expand.grid(hum = hum_grid, temp = temp_grid)
+
+# For each grid cell, substitute hum and temp and average predictions
+grid_2d$yhat <- apply(grid_2d, 1, function(row) {
+  tmp      <- train_2d
+  tmp$hum  <- row["hum"]
+  tmp$temp <- row["temp"]
+  mean(predict(rf_bike, newdata = tmp))
+})
+
+# Tile step sizes to avoid holes in geom_tile
+hum_step  <- (max(hum_grid)  - min(hum_grid))  / (length(hum_grid)  - 1)
+temp_step <- (max(temp_grid) - min(temp_grid)) / (length(temp_grid) - 1)
+
+# 2D heatmap with marginal rug distributions
+ggplot(grid_2d, aes(x = hum, y = temp, fill = yhat)) +
+  geom_tile(width  = hum_step  * 1.05,
+            height = temp_step * 1.05) +
+  scale_fill_viridis_c(
+    name   = "Predicted\nbike rentals",
+    option = "viridis"
+  ) +
+  geom_rug(
+    data        = day,
+    aes(x = hum, y = temp),
+    sides       = "bl",
+    alpha       = 0.5,
+    colour      = "black",
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "2D PDP - Humidity x Temperature",
+    x     = "Humidity",
+    y     = "Temperature"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid = element_blank())
+```
+
+## Interpretation
+
+The heatmap gradient is predominantly horizontal, indicating that **temperature dominates over humidity**. The yellow regions (~4,500 rentals) cover the entire band of high temperatures (>0.50) regardless of humidity level, while the dark regions (~3,000 rentals) correspond to low temperatures. Humidity has a secondary effect visible only at high temperatures, where values above 0.75 slightly reduce predicted demand. The rug marks show that real observations concentrate at medium-to-high humidity and moderate temperatures, with the extreme corners of the plot being less data-supported.
+
+---
+
+# Exercise 3 - PDP: House Price Prediction
+
+## Data Preparation
+
+The King County dataset contains 21,613 rows. To keep computation tractable, a **single random subset of 2,000 rows** is drawn from the full dataset. This same subset is used both to train the Random Forest and to compute the PDPs.
+
+```{r ex3-setup}
+# Load data
+houses <- read.csv("kc_house_data.csv")
+
+# Ensure numeric types
+houses$floors    <- as.numeric(as.character(houses$floors))
+houses$bathrooms <- as.numeric(houses$bathrooms)
+
+# Feature set as specified in the exercise
+features_house <- c("bedrooms", "bathrooms", "sqft_living",
+                    "sqft_lot", "floors", "yr_built")
+
+# Random subset of 2,000 rows: used for both training and PDP computation.
+# No seed is set: the sample is intentionally random to avoid
+# biasing the selection and to better represent the variability of the full dataset.
+idx_house   <- sample(nrow(houses), 2000)
+train_house <- houses[idx_house, c(features_house, "price")]
+
+# Train the Random Forest on the subset.
+# A seed is set only for the model, ensuring that the Random Forest
+# produces the same trees on every run (training reproducibility).
+set.seed(42)
+rf_house <- randomForest(price ~ ., data = train_house, ntree = 500)
+
+cat("Random Forest - House Prices\n")
+cat("OOB R2:", round(1 - rf_house$mse[500] / var(train_house$price), 3), "\n")
+```
+
+## PDP Computation and Plots
+
+```{r ex3-pdp, fig.height=8, fig.width=10}
+# Plot function for house prices
+plot_pdp_house <- function(pdp_df, x_label, ref_df, feature) {
+  ggplot(pdp_df, aes(x = x, y = yhat)) +
+    geom_line(colour = "black", linewidth = 0.9) +
+    geom_rug(
+      data        = ref_df,
+      aes_string(x = feature),
+      sides       = "b",
+      alpha       = 0.4,
+      colour      = "black",
+      inherit.aes = FALSE
+    ) +
+    labs(x = x_label, y = "Predicted house price (USD)") +
+    scale_y_continuous(labels = comma) +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+}
+
+# Compute 1D PDPs using the same subset (50 grid points each)
+pdp_bed   <- compute_pdp_1d(rf_house, "bedrooms",    train_house)
+pdp_bath  <- compute_pdp_1d(rf_house, "bathrooms",   train_house)
+pdp_sqft  <- compute_pdp_1d(rf_house, "sqft_living", train_house)
+pdp_floor <- compute_pdp_1d(rf_house, "floors",      train_house)
+
+# Build plots
+ph1 <- plot_pdp_house(pdp_bed,   "Bedrooms",          train_house, "bedrooms")
+ph2 <- plot_pdp_house(pdp_bath,  "Bathrooms",         train_house, "bathrooms")
+ph3 <- plot_pdp_house(pdp_sqft,  "Living area (sqft)", train_house, "sqft_living")
+ph4 <- plot_pdp_house(pdp_floor, "Floors",            train_house, "floors")
+
+grid.arrange(ph1, ph2, ph3, ph4, ncol = 2)
+```
+
+## Analysis
+
+**Bedrooms** shows anomalous behaviour: it starts at ~$590,000, drops sharply to a minimum around 3-4 bedrooms (~$548,000), then rises steadily and stabilises at ~$595,000 from 7-8 bedrooms onwards. The initial drop is likely a model artefact caused by the scarcity of observations at extreme values, as confirmed by the rug marks which concentrate between 1 and 6 bedrooms.
+
+**Bathrooms** presents a clear positive stepped relationship: the predicted price rises from ~$490,000 with few bathrooms to ~$930,000 with 5-6 bathrooms. The staircase shape is consistent with bathrooms taking discrete values. It is the variable with the largest absolute price impact range of the four analysed.
+
+**Living area (sqft)** shows the clearest and most intuitive relationship: monotonic growth from ~$370,000 for small homes to ~$1,600,000 for the largest ones. Growth is particularly steep between 1,000 and 4,000 sqft, the range where most observations concentrate according to the rug, gradually levelling off for very large properties.
+
+**Floors** produces a stepped pattern due to the few discrete values it takes (1, 1.5, 2, 2.5, 3, 3.5). The price rises from ~$543,000 for single-storey homes to ~$620,000 for 3.5-storey ones, with the largest jump occurring between 1 and 2 floors. The effect is positive but of smaller magnitude than living area or bathrooms.
+
+---
+
+# Conclusions
+
+PDPs proved effective across all three exercises for extracting interpretable feature effects from Random Forest models:
+
+- In the **bike rental** task, time shows a stepped year-on-year effect, temperature acts as a saturating curve, humidity only penalises demand above 50%, and windspeed has a moderate and uniform negative impact.
+- The **2D PDP** reveals that temperature dominates over humidity: predicted demand depends primarily on temperature level, with humidity playing a secondary role visible only at high temperatures.
+- In the **house price** task, living area is the most influential variable with a monotonic and wide-ranging effect, bathrooms show the largest absolute price impact, floors have a positive but moderate effect, and bedrooms display anomalous behaviour likely linked to data scarcity at extreme values.
+
+A key limitation of PDPs is the **marginal independence assumption**: when features are correlated, the grid evaluation integrates over combinations that may not exist in practice, potentially distorting the displayed effect. For datasets with strong feature correlations, Accumulated Local Effects (ALE) plots offer a more robust alternative.
