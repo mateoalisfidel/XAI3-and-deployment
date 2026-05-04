@@ -1,0 +1,305 @@
+---
+title: "XAI – Ejercicio 5: Graficos de Dependencia Parcial (PDP)"
+author: "Ciencia de Datos – Metodos Agnosticos al Modelo"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: '2'
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 2
+  word_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = "center",
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+# Introduccion
+
+Este informe aplica los **Graficos de Dependencia Parcial (PDP)** a dos tareas de prediccion sobre datos reales. El PDP es un metodo global de interpretabilidad agnostico al modelo que visualiza el efecto marginal de una o dos variables sobre la prediccion de un modelo previamente entrenado. Todos los modelos utilizados son **Bosques Aleatorios (Random Forests)** ajustados mediante el paquete `randomForest`.
+
+La funcion de dependencia parcial se estima como:
+
+$$\hat{f}_{x_S}(x_S) \approx \frac{1}{n}\sum_{i=1}^{n}\hat{f}(x_S,\, x_C^{(i)})$$
+
+donde $x_S$ es la variable de interes y $x_C$ son el resto de variables marginalizadas sobre los datos. Para cada grafico se evalua una rejilla de **al menos 50 valores equiespaciados**. Las marcas de densidad (*rug marks*) sobre los ejes representan la distribucion empirica de las observaciones de entrenamiento, ayudando a distinguir las regiones bien respaldadas por datos de las posibles extrapolaciones.
+
+---
+
+# Ejercicio 1 - PDP 1D: Prediccion de Alquiler de Bicicletas
+
+## Preparacion de Datos y Entrenamiento del Modelo
+
+```{r ex1-setup}
+# Librerias
+library(randomForest)
+library(ggplot2)
+library(gridExtra)
+library(scales)
+
+# Carga de datos
+day <- read.csv("day.csv")
+
+# Variable dias transcurridos desde el 01/01/2011
+day$days_since_2011 <- as.numeric(
+  as.Date(day$dteday) - as.Date("2011-01-01")
+)
+
+# Conjunto de variables predictoras (excluir fecha, id, casual, registered)
+features_bike <- c("days_since_2011", "season", "yr", "mnth", "holiday",
+                   "weekday", "workingday", "weathersit",
+                   "temp", "atemp", "hum", "windspeed")
+
+train_bike <- day[, c(features_bike, "cnt")]
+
+# Entrenamiento del Random Forest con el dataset completo (731 filas)
+# Se fija la semilla para garantizar la reproducibilidad del modelo:
+# el Random Forest tiene aleatoriedad interna (bootstrap y seleccion de variables)
+# y queremos que los resultados sean identicos cada vez que se ejecute el codigo.
+set.seed(42)
+rf_bike <- randomForest(cnt ~ ., data = train_bike, ntree = 500)
+
+cat("Random Forest - Alquiler de Bicicletas\n")
+cat("OOB R2:", round(1 - rf_bike$mse[500] / var(day$cnt), 3), "\n")
+```
+
+## Funciones Auxiliares para los PDP
+
+```{r ex1-helpers}
+# Funcion generica 1D PDP: evalua el modelo sobre una rejilla de >= 50 valores
+compute_pdp_1d <- function(model, feature, train_df, n_grid = 50) {
+  grid_vals <- seq(min(train_df[[feature]]),
+                   max(train_df[[feature]]),
+                   length.out = n_grid)
+  pdp_vals <- sapply(grid_vals, function(v) {
+    tmp            <- train_df
+    tmp[[feature]] <- v
+    mean(predict(model, newdata = tmp))
+  })
+  data.frame(x = grid_vals, yhat = pdp_vals)
+}
+
+# Funcion de visualizacion (linea + rug, estilo diapositivas de clase)
+plot_pdp_bike <- function(pdp_df, x_label, train_df, feature,
+                          y_limits = c(0, 5500)) {
+  ggplot(pdp_df, aes(x = x, y = yhat)) +
+    geom_line(colour = "black", linewidth = 0.9) +
+    geom_rug(
+      data        = train_df,
+      aes_string(x = feature),
+      sides       = "b",
+      alpha       = 0.4,
+      colour      = "black",
+      inherit.aes = FALSE
+    ) +
+    scale_y_continuous(limits = y_limits,
+                       breaks = seq(0, 5000, by = 1000)) +
+    labs(x = x_label, y = "Numero predicho de alquileres de bicicletas") +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+}
+```
+
+## Resultados
+
+```{r ex1-plots, fig.height=8, fig.width=10}
+# Calcular los cuatro PDP 1D (50 puntos de rejilla cada uno)
+pdp_days <- compute_pdp_1d(rf_bike, "days_since_2011", train_bike)
+pdp_temp <- compute_pdp_1d(rf_bike, "temp",            train_bike)
+pdp_hum  <- compute_pdp_1d(rf_bike, "hum",             train_bike)
+pdp_wind <- compute_pdp_1d(rf_bike, "windspeed",       train_bike)
+
+# Construir los graficos
+p1 <- plot_pdp_bike(pdp_days, "Dias desde 2011",      day, "days_since_2011")
+p2 <- plot_pdp_bike(pdp_temp, "Temperatura",          day, "temp")
+p3 <- plot_pdp_bike(pdp_hum,  "Humedad",              day, "hum")
+p4 <- plot_pdp_bike(pdp_wind, "Velocidad del viento", day, "windspeed")
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+## Analisis
+
+**Dias desde 2011** muestra una tendencia positiva clara. Los alquileres predichos crecen de forma sostenida a lo largo del tiempo, reflejando la adopción progresiva del servicio durante 2011 y 2012. El modelo ha capturado un fuerte efecto temporal que probablemente recoge tanto la estacionalidad como el crecimiento interanual de la demanda. Las marcas de densidad confirman que las observaciones cubren todo el rango temporal sin huecos.
+
+**Temperatura** presenta una relacion no lineal en forma de U invertida. Los alquileres aumentan con fuerza desde valores frios hasta temperaturas moderadas, alcanzan un maximo y luego se estabilizan o descienden ligeramente en los valores mas altos. Tanto el frio extremo como el calor excesivo desincentivan el uso de la bicicleta, comportamiento que el modelo captura con eficacia.
+
+**Humedad** tiene un efecto predominantemente negativo. Los alquileres predichos se mantienen relativamente estables con humedades bajas o moderadas, pero caen de forma notable al aumentar la humedad, lo que es coherente con las condiciones de lluvia o incomodidad que disuaden a los usuarios. Las marcas de densidad muestran que la mayoria de las observaciones se concentran en el rango medio.
+
+**Velocidad del viento** presenta una relacion negativa clara y sostenida: a mayor viento, menores alquileres predichos. El viento fuerte hace que pedalear sea fisicamente mas exigente y menos agradable, un patron de comportamiento que el modelo ha aprendido a lo largo de todo el rango de valores observados.
+
+---
+
+# Ejercicio 2 - PDP 2D: Humedad x Temperatura
+
+## Enfoque
+
+El Random Forest se entrena con el **dataset completo (731 filas)**. Para el calculo del PDP, sin embargo, se utiliza una muestra aleatoria de **50 observaciones** para aproximar la expectativa marginal: se sustituyen las dos variables de interes en la rejilla y se promedian las predicciones sobre las filas muestreadas. `geom_tile()` representa el mapa de calor con dimensiones de tesela ligeramente ampliadas (`x 1.05`) para evitar huecos visuales. Las marcas de densidad en ambos ejes muestran donde se concentran realmente los datos.
+
+```{r ex2-pdp, fig.height=6, fig.width=8}
+# El Random Forest fue entrenado con las 731 filas completas (Ejercicio 1)
+# Para el calculo del PDP se extraen 50 filas aleatorias del dataset.
+# NO se fija semilla aqui: queremos que la muestra sea verdaderamente aleatoria,
+# ya que el objetivo es aproximar la expectativa marginal sobre el conjunto de datos
+# sin sesgar la seleccion hacia una muestra concreta y fija.
+sample_idx_2d <- sample(nrow(train_bike), 50)
+train_2d      <- train_bike[sample_idx_2d, ]
+
+# Rejilla 50 x 50
+hum_grid  <- seq(min(train_bike$hum),  max(train_bike$hum),  length.out = 50)
+temp_grid <- seq(min(train_bike$temp), max(train_bike$temp), length.out = 50)
+grid_2d   <- expand.grid(hum = hum_grid, temp = temp_grid)
+
+# Para cada celda, sustituir hum y temp y promediar predicciones
+grid_2d$yhat <- apply(grid_2d, 1, function(row) {
+  tmp      <- train_2d
+  tmp$hum  <- row["hum"]
+  tmp$temp <- row["temp"]
+  mean(predict(rf_bike, newdata = tmp))
+})
+
+# Tamano de tesela para evitar huecos en geom_tile
+hum_step  <- (max(hum_grid)  - min(hum_grid))  / (length(hum_grid)  - 1)
+temp_step <- (max(temp_grid) - min(temp_grid)) / (length(temp_grid) - 1)
+
+# Mapa de calor 2D con distribuciones marginales (rug)
+ggplot(grid_2d, aes(x = hum, y = temp, fill = yhat)) +
+  geom_tile(width  = hum_step  * 1.05,
+            height = temp_step * 1.05) +
+  scale_fill_viridis_c(
+    name   = "Alquileres\npredichos",
+    option = "viridis"
+  ) +
+  geom_rug(
+    data        = day,
+    aes(x = hum, y = temp),
+    sides       = "bl",
+    alpha       = 0.35,
+    colour      = "black",
+    inherit.aes = FALSE
+  ) +
+  labs(
+    title = "PDP 2D - Humedad x Temperatura",
+    x     = "Humedad",
+    y     = "Temperatura"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid = element_blank())
+```
+
+## Interpretacion
+
+El PDP 2D revela el **efecto marginal conjunto** de la humedad y la temperatura sobre los alquileres predichos:
+
+- **Temperatura alta combinada con humedad baja** (region brillante/amarilla) produce la mayor demanda predicha, representando las condiciones mas favorables para el ciclismo.
+- **Temperatura baja combinada con humedad alta** (region oscura/morada) genera las predicciones mas bajas, ya que el frio y la humedad desincentivan fuertemente el uso de la bicicleta.
+- El gradiente de color sigue una diagonal clara desde la esquina inferior-derecha (peores condiciones) hasta la superior-izquierda (mejores condiciones), confirmando que ambas variables actuan de forma **reforzada**: la humedad alta amplifica el efecto negativo de las temperaturas bajas, y viceversa.
+- Las marcas de densidad blancas muestran que la mayoria de las observaciones reales se concentran en los rangos medios de ambos ejes. Las predicciones en las esquinas extremas se apoyan en menos datos y deben interpretarse con cautela.
+
+---
+
+# Ejercicio 3 - PDP: Prediccion del Precio de Viviendas
+
+## Preparacion de los Datos
+
+El dataset de King County contiene 21 613 filas. Para mantener la computacion tratable, se extrae un **unico subconjunto aleatorio de 2 000 filas** del dataset completo. Este mismo subconjunto se utiliza tanto para entrenar el Random Forest como para calcular los PDPs.
+
+```{r ex3-setup}
+# Carga de datos
+houses <- read.csv("kc_house_data.csv")
+
+# Asegurar tipos numericos
+houses$floors    <- as.numeric(as.character(houses$floors))
+houses$bathrooms <- as.numeric(houses$bathrooms)
+
+# Variables predictoras especificadas en el ejercicio
+features_house <- c("bedrooms", "bathrooms", "sqft_living",
+                    "sqft_lot", "floors", "yr_built")
+
+# Subconjunto aleatorio de 2 000 filas: usado para entrenar y para los PDP.
+# NO se fija semilla: la muestra es intencionadamente aleatoria para evitar
+# sesgar la seleccion y representar mejor la variabilidad del dataset completo.
+idx_house   <- sample(nrow(houses), 2000)
+train_house <- houses[idx_house, c(features_house, "price")]
+
+# Entrenar el Random Forest sobre el subconjunto.
+# Se fija la semilla unicamente para el modelo, garantizando que el Random Forest
+# produzca los mismos arboles en cada ejecucion (reproducibilidad del entrenamiento).
+set.seed(42)
+rf_house <- randomForest(price ~ ., data = train_house, ntree = 500)
+
+cat("Random Forest - Precios de Viviendas\n")
+cat("OOB R2:", round(1 - rf_house$mse[500] / var(train_house$price), 3), "\n")
+```
+
+## Calculo y Visualizacion de los PDP
+
+```{r ex3-pdp, fig.height=8, fig.width=10}
+# Funcion de visualizacion para precios de viviendas
+plot_pdp_house <- function(pdp_df, x_label, ref_df, feature) {
+  ggplot(pdp_df, aes(x = x, y = yhat)) +
+    geom_line(colour = "black", linewidth = 0.9) +
+    geom_rug(
+      data        = ref_df,
+      aes_string(x = feature),
+      sides       = "b",
+      alpha       = 0.4,
+      colour      = "black",
+      inherit.aes = FALSE
+    ) +
+    labs(x = x_label, y = "Precio predicho de vivienda (USD)") +
+    scale_y_continuous(labels = comma) +
+    theme_bw(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+}
+
+# Calcular los PDP 1D usando el mismo subconjunto (50 puntos de rejilla)
+pdp_bed   <- compute_pdp_1d(rf_house, "bedrooms",    train_house)
+pdp_bath  <- compute_pdp_1d(rf_house, "bathrooms",   train_house)
+pdp_sqft  <- compute_pdp_1d(rf_house, "sqft_living", train_house)
+pdp_floor <- compute_pdp_1d(rf_house, "floors",      train_house)
+
+# Construir los graficos
+ph1 <- plot_pdp_house(pdp_bed,   "Dormitorios",       train_house, "bedrooms")
+ph2 <- plot_pdp_house(pdp_bath,  "Banos",             train_house, "bathrooms")
+ph3 <- plot_pdp_house(pdp_sqft,  "Superficie (sqft)", train_house, "sqft_living")
+ph4 <- plot_pdp_house(pdp_floor, "Plantas",           train_house, "floors")
+
+grid.arrange(ph1, ph2, ph3, ph4, ncol = 2)
+```
+
+## Analisis
+
+**Dormitorios** muestra una relacion no lineal. Los precios predichos tienden a aumentar desde 1 hasta 3-4 dormitorios, pero el efecto se aplana o incluso se invierte con recuentos muy altos. Un numero muy elevado de dormitorios en una vivienda de tamano similar puede indicar habitaciones mas pequenas y menor calidad, reduciendo el valor marginal. Las marcas de densidad confirman que la mayoria de las viviendas tienen entre 2 y 5 dormitorios, por lo que las predicciones en los extremos son menos fiables.
+
+**Banos** presenta una tendencia positiva general: mas banos se asocian a precios predichos mas altos. Los banos actuan como indicador de calidad: las viviendas con mas banos tienden a ser mas grandes y de mayor nivel. El efecto es mas pronunciado en recuentos bajos y se aplana progresivamente por encima de 3-4 banos, lo que sugiere rendimientos decrecientes.
+
+**Superficie habitable (sqft_living)** es la variable mas influyente. Los precios predichos aumentan de forma monotona y sustancial con la superficie, con una curva que crece con fuerza para viviendas grandes. Esto refleja el papel dominante del tamano en la valoracion inmobiliaria. Las marcas de densidad revelan que la gran mayoria de las observaciones se concentran en el rango bajo-medio; la cola derecha del PDP, que representa viviendas muy grandes, esta menos respaldada por datos.
+
+**Plantas** muestra un efecto positivo pero moderado. Las viviendas de una sola planta se asocian a precios predichos mas bajos, mientras que las de dos plantas alcanzan valores notablemente mayores. La relacion se estabiliza a partir de 2 plantas, indicando rendimientos marginales decrecientes. Al tomar la variable solo unos pocos valores discretos (1, 1.5, 2, 2.5, 3), el PDP produce un patron escalonado en lugar de una curva suave.
+
+---
+
+# Conclusiones
+
+Los PDP han resultado eficaces en los tres ejercicios para extraer efectos de variables interpretables y promediados globalmente a partir de modelos Random Forest:
+
+- En la tarea de **alquiler de bicicletas**, las cuatro variables muestran efectos direccionales coherentes con el comportamiento ciclista real: el tiempo impulsa el crecimiento, la temperatura y la humedad determinan el confort, y el viento desincentiva el uso.
+- El **PDP 2D** confirma una interaccion reforzada entre humedad y temperatura, con condiciones calidas y secas produciendo la mayor demanda predicha.
+- En la tarea de **precio de viviendas**, la superficie domina la prediccion, mientras que los dormitorios, banos y plantas aportan senales secundarias pero interpretables, coherentes con las expectativas del mercado inmobiliario.
+
+Una limitacion clave de los PDP es el **supuesto de independencia marginal**: cuando las variables estan correlacionadas, la evaluacion sobre la rejilla integra combinaciones que pueden no existir en la practica, distorsionando potencialmente el efecto visualizado. Para conjuntos de datos con fuertes correlaciones entre variables, los graficos de Efectos Locales Acumulados (ALE) ofrecen una alternativa mas robusta.
